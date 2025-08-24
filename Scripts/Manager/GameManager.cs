@@ -1,0 +1,323 @@
+﻿
+using System;
+using System.Collections.Generic;
+using UnityEngine;
+using System.Threading.Tasks;
+using Unity.Services.CloudCode;
+
+public interface FSM
+{
+	FSM OnEnter();
+	void OnUpdate(float time);
+	void OnExit();
+
+	FSM RunNextState(float time);
+}
+
+
+public class GameManager : MonoBehaviour
+{
+	private static GameManager instance;
+	public static GameManager it
+	{
+		get
+		{
+			return instance;
+		}
+	}
+	public float gameSpeed = 1;
+	public bool fixedScroll;
+
+	public bool firstEnter = true;
+
+
+	[SerializeField] private SystemSleepMode sleepMode;
+	public SystemSleepMode SleepMode => sleepMode;
+
+	private float touchTime;
+	public bool isSleepMode;
+
+	public static bool GameStop = false;
+	public static float GlobalTimeScale = 1f;
+
+	public event Action<List<RuntimeData.RewardInfo>> OnSleepModeAcquiredItem;
+	public event Action<IdleNumber> OnSleepModeAcquiredGold;
+	public event Action<IdleNumber> OnSleepModeAcquiredExp;
+
+	public event Action AddRewardEvent;
+
+	long currTicks;
+	long prevPlayTicks;
+
+
+	DateTime updateCheckTime = new DateTime();
+	private void Awake()
+	{
+		instance = this;
+	}
+
+	public void SleepModeAcquiredItem(List<RuntimeData.RewardInfo> info)
+	{
+		OnSleepModeAcquiredItem?.Invoke(info);
+	}
+	public void SleepModeAcquiredGold(IdleNumber info)
+	{
+		OnSleepModeAcquiredGold?.Invoke(info);
+	}
+	public void SleepModeAcquiredExp(IdleNumber info)
+	{
+		OnSleepModeAcquiredExp?.Invoke(info);
+	}
+
+	bool containerInit = false;
+	// Start is called before the first frame update
+	async void Start()
+	{
+		PlatformManager.Instance.ShowLoadingRotate(false);
+		GameStop = false;
+
+		PlatformManager.UserDB.Init();
+
+		_StageManager.it.Init();
+		time = 0;
+		touchTime = Time.realtimeSinceStartup;
+		try
+		{
+			//await RemoteConfigManager.Instance.FetchConfigs();
+			//currentFSM = loadingState.OnEnter();
+
+			await CallTimeStampEndPoint();
+
+			var playerInfo = await PlatformManager.Instance.GetPlayerInfo();
+			GameSetting.Instance.AutoPowerSaveChanged += OnAutoPowerSaveChanged;
+
+			double totalMinutes = GetOfflineRewardTime();
+			if (totalMinutes >= 1)
+			{
+				_StageManager.it.OfflineRewards((int)totalMinutes);
+			}
+			containerInit = true;
+
+
+			updateCheckTime = new DateTime(TimeManager.Instance.UtcNow.Ticks);
+		}
+
+		catch (Exception ex)
+		{
+
+		}
+		time = 0;
+	}
+
+	void OnAutoPowerSaveChanged(bool isOn)
+	{
+		touchTime = Time.realtimeSinceStartup;
+	}
+
+	private void OnDestroy()
+	{
+		GameSetting.Instance.AutoPowerSaveChanged -= OnAutoPowerSaveChanged;
+
+	}
+	//Unity Cloud Code 를 이용하여 서버시간을 가져옴, 데이터 로드 이후 가장 먼저 실행되어야함
+	public async Task CallTimeStampEndPoint()
+	{
+		try
+		{
+			long timeStamp = await CloudCodeService.Instance.CallEndpointAsync<long>("TimeStamp", new Dictionary<string, object>());
+			if (this == null) return;
+			DateTime dt = new System.DateTime(1970, 1, 1, 0, 0, 0, 0, DateTimeKind.Utc);
+			var utcerverTime = dt.AddSeconds(timeStamp / 1000);
+
+			TimeManager.Instance.SetServerTime(utcerverTime);
+
+			SetLoginTime();
+		}
+		catch (CloudCodeException e)
+		{
+			Debug.LogException(e);
+		}
+		catch (Exception e)
+		{
+			Debug.LogException(e);
+		}
+	}
+
+	public void SetLoginTime()
+	{
+		if (DateTime.TryParse(PlatformManager.UserDB.userInfoContainer.NextResetTime, out DateTime resetTime))
+		{
+			TimeSpan ts = resetTime - TimeManager.Instance.UtcNow;
+			//최근 접속 시간과 하루 이상 차이가 나면 초기화
+			if (ts.TotalMinutes < 0)
+			{
+				PlatformManager.UserDB.ResetDataByDateTime();
+				PlatformManager.UserDB.userInfoContainer.NextResetTime = TimeUtil.NextDayResetTimeToString();
+			}
+		}
+		else
+		{
+			Debug.LogWarning("Could not Parse 'String to Datetime'. Presume New User");
+			PlatformManager.UserDB.ResetDataByDateTime();
+			PlatformManager.UserDB.userInfoContainer.NextResetTime = TimeUtil.NextDayResetTimeToString();
+		}
+
+		var time = TimeManager.Instance.UtcNow;
+
+		TimeManager.Instance.LastLoginTimeForOfflineReward = PlatformManager.UserDB.userInfoContainer.LastLoginTime;
+		PlatformManager.UserDB.userInfoContainer.LastLoginTime = time.ToString();
+
+	}
+
+	private void EnterSleepMode(bool inputAnyKey)
+	{
+		if (inputAnyKey == false)
+		{
+			if (isSleepMode == false)
+			{
+				if (Time.realtimeSinceStartup - touchTime > 50)
+				{
+					sleepMode.Open();
+				}
+			}
+		}
+		else
+		{
+			touchTime = Time.realtimeSinceStartup;
+		}
+	}
+
+	private void OnInputMobile()
+	{
+		EnterSleepMode(Input.touchCount > 0);
+
+	}
+	private void OnInputPC()
+	{
+		EnterSleepMode(Input.anyKey);
+	}
+	private void CheckSleepMode()
+	{
+		if (_StageManager.it.CheckNormalStage() == false)
+		{
+			touchTime = Time.realtimeSinceStartup;
+			return;
+		}
+#if UNITY_EDITOR
+		OnInputPC();
+#else
+		OnInputMobile();
+#endif
+	}
+
+
+	private void Update()
+	{
+		if (GameSetting.Instance.AutoPowerSave)
+		{
+			CheckSleepMode();
+		}
+
+		if (containerInit)
+		{
+			//PlatformManager.UserDB.buffContainer.OnUpdateBuff();
+
+			currTicks = TimeManager.Instance.UtcNow.Ticks;
+			long tick = (currTicks - prevPlayTicks);
+			PlatformManager.UserDB.userInfoContainer.userInfo.PlayTicks += tick;
+			PlatformManager.UserDB.userInfoContainer.userInfo.DailyPlayTicks += tick;
+			prevPlayTicks = currTicks;
+
+			if ((TimeManager.Instance.UtcNow - updateCheckTime).TotalMinutes > 10)
+			{
+				CheckUpdate(null);
+				updateCheckTime = new DateTime(currTicks);
+			}
+		}
+
+	}
+
+	float time = 0f;
+	private void FixedUpdate()
+	{
+		if (containerInit == false)
+		{
+			return;
+		}
+		time += Time.fixedUnscaledDeltaTime;
+
+		if (time > 1f)
+		{
+			PlatformManager.UserDB.userInfoContainer.LastLoginTime = TimeManager.Instance.UtcNow.ToString();
+			PlatformManager.UserDB.Save();
+			time = 0;
+		}
+	}
+
+	public void CallAddRewardEvent()
+	{
+		AddRewardEvent?.Invoke();
+	}
+
+	public double GetOfflineRewardTime()
+	{
+		DateTime lastTime = TimeManager.Instance.UtcNow;
+		if (DateTime.TryParse(TimeManager.Instance.LastLoginTimeForOfflineReward, out lastTime))
+		{
+			TimeManager.Instance.LastLoginTimeForOfflineReward = TimeManager.Instance.UtcNow.ToString();
+			TimeSpan ts = TimeManager.Instance.UtcNow - lastTime;
+			return ts.TotalMinutes;
+		}
+		return 0;
+
+	}
+
+	public async void CheckUpdate(System.Action action)
+	{
+		await RemoteConfigManager.Instance.FetchConfigs();
+		if (this == null)
+		{
+			return;
+		}
+		if (RemoteConfigManager.Instance.NeedUpdate())
+		{
+			return;
+		}
+
+		if (RemoteConfigManager.Instance.IsNoticeExist(action))
+		{
+			return;
+		}
+		action?.Invoke();
+	}
+
+
+	DateTime applicationTime;
+	private void OnApplicationFocus(bool focus)
+	{
+		if (focus)
+		{
+			PlatformManager.Instance.ShowLoadingRotate(true);
+
+			CheckUpdate(OnFocusGame);
+		}
+		else
+		{
+			PlatformManager.UserDB.userInfoContainer.LastLoginTime = TimeManager.Instance.UtcNow.ToString();
+
+			applicationTime = new DateTime(TimeManager.Instance.UtcNow.Ticks);
+		}
+	}
+
+	async void OnFocusGame()
+	{
+		await CallTimeStampEndPoint();
+		PlatformManager.Instance.ShowLoadingRotate(false);
+		TimeSpan ts = TimeManager.Instance.UtcNow - applicationTime;
+		if (ts.TotalMinutes >= 1)
+		{
+			Debug.Log(ts.TotalMinutes);
+			_StageManager.it.OfflineRewards((int)ts.TotalMinutes);
+		}
+	}
+}

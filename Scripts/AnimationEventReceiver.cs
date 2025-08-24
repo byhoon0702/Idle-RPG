@@ -1,0 +1,74 @@
+﻿using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using System;
+
+
+
+[RequireComponent(typeof(Animator))]
+public class AnimationEventReceiver : MonoBehaviour
+{
+
+	[SerializeField] Unit owner;
+	[SerializeField] ParticleSystem particle;
+
+	public void Init(Unit _owner)
+	{
+		owner = _owner;
+	}
+	public void Attack()
+	{
+		owner?.Attack();
+	}
+
+	public void UseSkill()
+	{
+
+		owner?.Skill();
+	}
+
+	public void EndHyper()
+	{
+		//if (owner is PlayerUnit)
+		//{
+		//	if ((owner as PlayerUnit).ignoreAnimationEndEvent)
+		//	{
+		//		return;
+		//	}
+		//}
+		//owner?.EndHyper();
+	}
+
+	public void SpawnEffect()
+	{
+
+	}
+
+	public void CameraShake(UnityEngine.Object effect)
+	{
+		if (effect is  SkillScreenEffect == false)
+		{
+			return;
+		}
+		(effect as SkillScreenEffect).DoEffect();
+	}
+
+	public void MinusLoopCount()
+	{
+		var animator = GetComponent<Animator>();
+		int count = animator.GetInteger("attackLoop");
+		count--;
+		animator.SetInteger("attackLoop", count);
+	}
+
+	public void ParticleStart()
+	{
+		if (particle == null)
+		{
+			return;
+		}
+
+		particle.Stop();
+		particle.Play();
+	}
+}
